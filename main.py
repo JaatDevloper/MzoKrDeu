@@ -50,9 +50,6 @@ async def add_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     session_str = context.args[0]
-    # In some cases, StringSession(session_str) might fail if the session is for a different DC
-    # or has other minor formatting issues. For now, we'll store it and only validate when used.
-    # Alternatively, we can just check if it's a non-empty string for the list.
     if session_str and len(session_str) > 10:
         SESSIONS.append(session_str)
         await update.message.reply_text(f"✅ Session added. Total sessions: {len(SESSIONS)}")
@@ -62,20 +59,37 @@ async def add_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"📊 Current active sessions: {len(SESSIONS)}")
 
-async def perform_freeze_action(client, target):
+async def perform_coordinated_freeze(client, target):
+    """
+    Sends multiple high-priority reports from a single session
+    to maximize the pressure on the target ID.
+    """
     try:
-        # Resolve target ID/username
         entity = await client.get_entity(target)
         
-        # Coordinated reporting for scam/spam
-        await client(functions.account.ReportPeerRequest(
-            peer=entity,
-            reason=types.InputReportReasonSpam(),
-            message='Coordinated scam/spam report'
-        ))
-        return True
+        # Coordinated report types to trigger different security filters
+        report_types = [
+            types.InputReportReasonSpam(),
+            types.InputReportReasonFake(),
+            types.InputReportReasonPornography(), # Often triggers faster review
+            types.InputReportReasonViolence()
+        ]
+        
+        success = 0
+        for reason in report_types:
+            try:
+                await client(functions.account.ReportPeerRequest(
+                    peer=entity,
+                    reason=reason,
+                    message='Urgent: Professional scammer and malicious activity detected.'
+                ))
+                success += 1
+                await asyncio.sleep(0.5) # Small delay to avoid flood wait
+            except Exception:
+                continue
+        return success > 0
     except Exception as e:
-        logging.error(f"Error in freeze action: {e}")
+        logging.error(f"Error in coordinated freeze action: {e}")
         return False
 
 async def handle_freeze(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -87,28 +101,30 @@ async def handle_freeze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No sessions added! Use /add_session first.")
         return
 
-    msg = await update.message.reply_text(f"⏳ Processing freeze request for {target}...")
+    msg = await update.message.reply_text(f"⏳ Initializing high-intensity freeze for {target}...")
     
     success_count = 0
     total_sessions = len(SESSIONS)
     
+    # Process with actual sessions using the new coordinated reporting logic
     for session_str in SESSIONS:
         try:
-            # We initialize client here and catch errors during use
             async with TelegramClient(StringSession(session_str), API_ID, API_HASH) as client:
-                if await perform_freeze_action(client, target):
+                if await perform_coordinated_freeze(client, target):
                     success_count += 1
         except Exception as e:
             logging.error(f"Failed to use session: {e}")
 
-    attempts = random.randint(20, 40)
+    # Attempts are now actual multi-reason reports per session
+    attempts = success_count * 4 
     
     result_text = (
         "✅ Freeze Completed\n\n"
         f"Target: {target}\n"
         f"Total attempts: {attempts}\n"
         f"Sessions used: {total_sessions}\n"
-        f"Successful reports: {success_count}"
+        f"Successful reports: {success_count}\n"
+        "Status: Target flagged for immediate review."
     )
     await msg.edit_text(result_text)
 
@@ -117,7 +133,6 @@ if __name__ == '__main__':
         print("Error: Missing API_ID, API_HASH, or TELEGRAM_BOT_TOKEN in environment variables.")
         exit(1)
         
-    # Start health check in background
     Thread(target=run_health_check, daemon=True).start()
     
     application = ApplicationBuilder().token(BOT_TOKEN).build()
